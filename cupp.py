@@ -31,22 +31,42 @@
 #  See 'LICENSE' for more information.
 
 import argparse
+import concurrent.futures
 import configparser
 import csv
 import functools
 import gzip
+import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import time
+
+try:
+    from zxcvbn import zxcvbn
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    zxcvbn = None
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - tqdm is optional at runtime
+    tqdm = None
 
 __author__ = "Mebus"
 __license__ = "GPL"
 __version__ = "3.3.0"
 
 CONFIG = {}
+
+
+def _require_zxcvbn():
+    if zxcvbn is None:  # pragma: no cover - guard for missing optional dependency
+        raise ImportError(
+            "The zxcvbn package is required for password scoring. "
+            "Install it with 'pip install zxcvbn'."
+        )
 
 
 def read_config(filename):
@@ -370,11 +390,38 @@ def interactive():
     ).lower()
     profile["leetmode"] = input("> Leet mode? (i.e. leet = 1337) Y/[N]: ").lower()
 
-    generate_wordlist_from_profile(profile)  # generate the wordlist
+    generate_wordlist_from_profile(profile, output_file=profile["name"] + ".txt")
 
 
-def generate_wordlist_from_profile(profile):
-    """ Generates a wordlist from a given profile """
+def generate_wordlist_from_profile(profile, output_file=None, limit=None):
+    """Generates a wordlist from a given profile.
+
+    When ``output_file`` is provided the wordlist is written to disk; otherwise
+    the generated list is returned to the caller."""
+
+    defaults = {
+        "name": "",
+        "surname": "",
+        "nick": "",
+        "birthdate": "",
+        "wife": "",
+        "wifen": "",
+        "wifeb": "",
+        "kid": "",
+        "kidn": "",
+        "kidb": "",
+        "pet": "",
+        "company": "",
+        "words": [""],
+        "spechars1": "n",
+        "randnum": "n",
+        "leetmode": "n",
+    }
+    for key, value in defaults.items():
+        profile.setdefault(key, value)
+
+    if isinstance(profile["words"], str):
+        profile["words"] = [profile["words"]]
 
     chars = CONFIG["global"]["chars"]
     years = CONFIG["global"]["years"]
@@ -383,7 +430,7 @@ def generate_wordlist_from_profile(profile):
 
     profile["spechars"] = []
 
-    if profile["spechars1"] == "y":
+    if profile.get("spechars1", "n") == "y":
         for spec1 in chars:
             profile["spechars"].append(spec1)
             for spec2 in chars:
@@ -391,9 +438,10 @@ def generate_wordlist_from_profile(profile):
                 for spec3 in chars:
                     profile["spechars"].append(spec1 + spec2 + spec3)
 
-    print("\r\n[+] Now making a dictionary...")
+    if output_file:
+        print("\r\n[+] Now making a dictionary...")
 
-    # Now me must do some string modifications...
+    # Now we must do some string modifications...
 
     # Birthdays first
 
@@ -433,9 +481,7 @@ def generate_wordlist_from_profile(profile):
     petup = profile["pet"].title()
     companyup = profile["company"].title()
 
-    wordsup = []
     wordsup = list(map(str.title, profile["words"]))
-
     word = profile["words"] + wordsup
 
     # reverse a name
@@ -600,10 +646,10 @@ def generate_wordlist_from_profile(profile):
     kombi[6] += list(komb(kombinaaw, years, "_"))
     kombi[7] = list(komb(kombinaak, years))
     kombi[7] += list(komb(kombinaak, years, "_"))
-    kombi[8] = list(komb(word, bdss))
-    kombi[8] += list(komb(word, bdss, "_"))
-    kombi[9] = list(komb(word, wbdss))
-    kombi[9] += list(komb(word, wbdss, "_"))
+    kombi[8] = list(komb(kombinaa, bdss))
+    kombi[8] += list(komb(kombinaa, bdss, "_"))
+    kombi[9] = list(komb(kombinaaw, wbdss))
+    kombi[9] += list(komb(kombinaaw, wbdss, "_"))
     kombi[10] = list(komb(word, kbdss))
     kombi[10] += list(komb(word, kbdss, "_"))
     kombi[11] = list(komb(word, years))
@@ -614,7 +660,7 @@ def generate_wordlist_from_profile(profile):
     kombi[15] = [""]
     kombi[16] = [""]
     kombi[21] = [""]
-    if profile["randnum"] == "y":
+    if profile.get("randnum", "n") == "y":
         kombi[12] = list(concats(word, numfrom, numto))
         kombi[13] = list(concats(kombinaa, numfrom, numto))
         kombi[14] = list(concats(kombinaac, numfrom, numto))
@@ -643,7 +689,8 @@ def generate_wordlist_from_profile(profile):
         komb005 = list(komb(word, profile["spechars"]))
         komb006 = list(komb(reverse, profile["spechars"]))
 
-    print("[+] Sorting list and removing duplicates...")
+    if output_file:
+        print("[+] Sorting list and removing duplicates...")
 
     komb_unique = {}
     for i in range(1, 22):
@@ -686,26 +733,229 @@ def generate_wordlist_from_profile(profile):
     )
     unique_lista = list(dict.fromkeys(uniqlist).keys())
     unique_leet = []
-    if profile["leetmode"] == "y":
-        for (
-            x
-        ) in (
-            unique_lista
-        ):  # if you want to add more leet chars, you will need to add more lines in cupp.cfg too...
-
-            x = make_leet(x)  # convert to leet
+    if profile.get("leetmode", "n") == "y":
+        for x in unique_lista:  # convert to leet if requested
+            x = make_leet(x)
             unique_leet.append(x)
 
     unique_list = unique_lista + unique_leet
 
-    unique_list_finished = []
     unique_list_finished = [
         x
         for x in unique_list
         if len(x) < CONFIG["global"]["wcto"] and len(x) > CONFIG["global"]["wcfrom"]
     ]
 
-    print_to_file(profile["name"] + ".txt", unique_list_finished)
+    if limit is not None:
+        unique_list_finished = unique_list_finished[:limit]
+
+    if output_file:
+        print_to_file(output_file, unique_list_finished)
+
+    return unique_list_finished
+
+
+def _normalize_name(value):
+    if not value:
+        return ""
+    return "".join(str(value).strip().lower().split())
+
+
+def _normalize_lower(value):
+    if not value:
+        return ""
+    return str(value).strip().lower()
+
+
+def _normalize_digits(value):
+    if not value:
+        return ""
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _coerce_choice(value, default="n"):
+    if value is None:
+        return default
+    return "y" if str(value).strip().lower().startswith("y") else "n"
+
+
+def build_profile_from_json(entry):
+    """Convert a JSON entry into a profile compatible with the generator."""
+
+    profile = {
+        "name": _normalize_name(entry.get("first_name")),
+        "surname": _normalize_name(entry.get("surname")),
+        "nick": _normalize_name(entry.get("nickname")),
+        "birthdate": _normalize_digits(entry.get("birthdate")),
+        "wife": _normalize_name(entry.get("partner_name")),
+        "wifen": _normalize_name(entry.get("partner_name")),
+        "wifeb": _normalize_digits(entry.get("partner_birth")),
+        "kid": _normalize_name(entry.get("child_name")),
+        "kidn": _normalize_name(entry.get("child_name")),
+        "kidb": _normalize_digits(entry.get("child_birth")),
+        "pet": _normalize_name(entry.get("pet")),
+        "company": _normalize_name(entry.get("company")),
+        "words": [""],
+        "spechars1": _coerce_choice(entry.get("special_chars", "n")),
+        "randnum": _coerce_choice(entry.get("random_numbers", "n")),
+        "leetmode": _coerce_choice(entry.get("leet_mode", "n")),
+    }
+
+    extra_words = []
+    keywords = entry.get("keywords")
+    if keywords:
+        extra_words.extend(
+            w.strip().lower()
+            for w in str(keywords).replace(" ", "").split(",")
+            if w.strip()
+        )
+
+    for extra in (entry.get("email"), entry.get("phone"), entry.get("company")):
+        normalized = _normalize_lower(extra)
+        if normalized:
+            extra_words.append(normalized)
+
+    extra_words = list(dict.fromkeys(extra_words))
+    if extra_words:
+        profile["words"] = extra_words
+
+    return profile
+
+
+def _score_chunk(passwords):
+    _require_zxcvbn()
+    local_zxcvbn = zxcvbn
+    results = []
+    for password in passwords:
+        analysis = local_zxcvbn(password)
+        guesses = int(analysis.get("guesses", 0))
+        score = int(analysis.get("score", 0))
+        results.append((password, guesses, score))
+    return results
+
+
+def _chunk_passwords(passwords, chunk_size):
+    chunk_size = max(1, int(chunk_size))
+    for index in range(0, len(passwords), chunk_size):
+        yield passwords[index : index + chunk_size]
+
+
+def evaluate_passwords(passwords, jobs=1, show_progress=False, progress_desc="Scoring"):
+    if not passwords:
+        return []
+
+    _require_zxcvbn()
+    local_zxcvbn = zxcvbn
+
+    total = len(passwords)
+    jobs = max(1, int(jobs))
+    progress_bar = None
+    if show_progress and tqdm is not None:
+        progress_bar = tqdm(total=total, desc=progress_desc, leave=False)
+
+    results = []
+
+    if jobs == 1:
+        for password in passwords:
+            analysis = local_zxcvbn(password)
+            guesses = int(analysis.get("guesses", 0))
+            score = int(analysis.get("score", 0))
+            results.append((password, guesses, score))
+            if progress_bar:
+                progress_bar.update(1)
+    else:
+        chunk_size = max(500, total // (jobs * 4) or total)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
+            futures = {
+                executor.submit(_score_chunk, chunk): len(chunk)
+                for chunk in _chunk_passwords(passwords, chunk_size)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                chunk_results = future.result()
+                results.extend(chunk_results)
+                if progress_bar:
+                    progress_bar.update(futures[future])
+
+    if progress_bar:
+        progress_bar.close()
+
+    return results
+
+
+def process_json_dataset(
+    json_path,
+    answer_path,
+    max_per_profile,
+    top_per_profile,
+    jobs=1,
+    show_progress=True,
+):
+    _require_zxcvbn()
+
+    with open(json_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    if not isinstance(data, list):
+        raise ValueError("JSON dataset must be a list of profile objects")
+
+    total_profiles = len(data)
+    if total_profiles == 0:
+        print(f"[-] No profiles found in {json_path}.")
+        return
+
+    progress_enabled = show_progress and tqdm is not None
+    progress_bar = None
+    if progress_enabled:
+        progress_bar = tqdm(data, desc="Profiles", unit="profile")
+        profile_iter = enumerate(progress_bar, start=1)
+    else:
+        profile_iter = enumerate(data, start=1)
+
+    limit = None if max_per_profile is None or max_per_profile <= 0 else int(max_per_profile)
+    top_count = int(top_per_profile)
+    jobs = max(1, int(jobs))
+
+    os.makedirs(os.path.dirname(answer_path) or ".", exist_ok=True)
+
+    with open(answer_path, "w", encoding="utf-8") as output:
+        for index, entry in profile_iter:
+            profile = build_profile_from_json(entry)
+            candidates = generate_wordlist_from_profile(profile, limit=limit)
+
+            scored = evaluate_passwords(
+                candidates,
+                jobs=jobs,
+                show_progress=progress_enabled,
+                progress_desc=f"Scoring profile {index}/{total_profiles}",
+            )
+
+            scored.sort(key=lambda item: (item[1], item[2], len(item[0]), item[0]))
+
+            top_passwords = [password for password, _, _ in scored[:top_count]]
+            if len(top_passwords) < top_count:
+                seen = set(top_passwords)
+                for password in candidates:
+                    if password in seen:
+                        continue
+                    top_passwords.append(password)
+                    seen.add(password)
+                    if len(top_passwords) == top_count:
+                        break
+
+            for password in top_passwords[:top_count]:
+                output.write(password + os.linesep)
+            output.write("<END>" + os.linesep)
+
+            if not progress_enabled:
+                print(
+                    f"[+] Processed profile {index}/{total_profiles}: "
+                    f"wrote {len(top_passwords[:top_count])} passwords"
+                )
+
+    if progress_bar:
+        progress_bar.close()
+
+    print(f"[+] Saved aggregated passwords to {answer_path}")
 
 
 def download_http(url, targetfile):
@@ -1043,6 +1293,20 @@ def main():
         alectodb_download()
     elif args.improve:
         improve_dictionary(args.improve)
+    elif args.json_path:
+        if args.top_per_profile <= 0:
+            parser.error("--top-per-profile must be greater than zero")
+        if args.max_per_profile is not None and args.max_per_profile > 0:
+            if args.max_per_profile < args.top_per_profile:
+                parser.error("--max-per-profile must be greater than or equal to --top-per-profile")
+        process_json_dataset(
+            args.json_path,
+            args.answer_file,
+            args.max_per_profile,
+            args.top_per_profile,
+            jobs=args.jobs,
+            show_progress=not args.no_progress,
+        )
     else:
         parser.print_help()
 
@@ -1084,8 +1348,42 @@ def get_parser():
     group.add_argument(
         "-v", "--version", action="store_true", help="Show the version of this program."
     )
+    group.add_argument(
+        "--json",
+        dest="json_path",
+        metavar="FILE",
+        help="Generate passwords for each profile in the provided JSON dataset.",
+    )
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="Quiet mode (don't print banner)"
+    )
+    parser.add_argument(
+        "--max-per-profile",
+        type=int,
+        default=100000,
+        help="Maximum number of candidate passwords to keep per profile before scoring.",
+    )
+    parser.add_argument(
+        "--top-per-profile",
+        type=int,
+        default=10000,
+        help="Number of highest-priority passwords to retain per profile after scoring.",
+    )
+    parser.add_argument(
+        "--answer-file",
+        default="answer.txt",
+        help="Destination file for the aggregated password lists.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=max(1, (os.cpu_count() or 1) // 2),
+        help="Number of worker processes to use when scoring passwords with zxcvbn.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bars while processing JSON datasets.",
     )
 
     return parser
